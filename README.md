@@ -1,62 +1,73 @@
 # warzone-games
 
-Browser arena game for `warzone.njakasoa.xyz` — part of the `*.njakasoa.xyz`
-constellation. Static front (HTML5 canvas + vanilla JS, zero build), deployed on
-**Cloudflare Pages** (push to `main` → auto-deploy).
+Neon arena `.io` game for **warzone.njakasoa.xyz** — part of the
+`*.njakasoa.xyz` constellation. Grow your orb by devouring slimes, eat rivals,
+grab power-ups, level up and stack roguelite upgrades. Last orb standing — or
+biggest when the timer ends — wins.
 
-> **Status:** base import. This is a fork of [Orbhold](https://github.com/AgentRateLimit/Orbhold)
-> (MIT) being adapted to the njakasoa stack. Real multiplayer (friends in a room)
-> is the next step — see the roadmap.
+Built with **Vite + TypeScript + PixiJS** (WebGL). Modernized fork of
+[Orbhold](https://github.com/AgentRateLimit/Orbhold) (MIT).
 
-## Play
+## Features
 
-- **Move:** WASD / arrow keys
-- Collect slimes to grow your squad; collide with rivals to fight
-- Win by having the most characters when the timer ends, or be the last standing
+- **Modern stack** — PixiJS v8 renderer, neon glow + particles + camera, Vite/TS.
+- **Upgrades** — level up → pick 1 of 3 cards (speed, magnet, greed, armor…).
+- **Power-ups** — map pickups: boost, shield, frenzy, magnet.
+- **Procedural audio** — WebAudio SFX, zero audio assets to ship.
+- **Multiplayer-ready** — a `NetGame` transport abstraction. Solo runs locally;
+  online is a host-authoritative swap over **core-api**'s realtime gateway
+  (`wss://api.njakasoa.xyz/rt`). See [src/net](./src/net).
 
-## Run locally
+## Controls
 
-No build, no dependencies — serve the folder:
+**WASD** / arrows / drag to move · **Space** to dash.
+
+## Develop
 
 ```bash
-bunx serve .        # or: python3 -m http.server
+bun install
+bun run dev       # http://localhost:5173
+bun run build     # type-check + bundle → dist/
 ```
 
 ## Deploy (Cloudflare Pages)
 
-Connect this repo in the Cloudflare dashboard (one time), then every push to
-`main` redeploys:
+Connect this repo in the dashboard once, then every push to `main` redeploys:
 
-- **Build command:** *(none)*
-- **Build output directory:** `/`
-- **Production branch:** `main`
+- **Framework preset:** Vite
+- **Build command:** `bun run build` (or `npm run build`)
+- **Build output directory:** `dist`
 - **Custom domain:** `warzone.njakasoa.xyz`
 
-`_headers` carries the security + cache headers (and pre-allows
-`wss://api.njakasoa.xyz` for the upcoming multiplayer link).
+`public/_headers` ships the security/cache headers and pre-allows
+`https://api.njakasoa.xyz` + `wss://api.njakasoa.xyz` for online play.
 
-## Roadmap — real multiplayer
+## Multiplayer
 
-The current build is single-player against bots. Multiplayer between friends
-will run over **core-api**'s realtime gateway (already live):
+Online play needs a guest token from core-api (`POST /v1/auth/guest`, shipped in
+the companion core-api PR) so the browser can open `/rt` without an account.
+Each match is one room (host-authoritative): the host simulates and broadcasts
+snapshots ~15 Hz; clients send inputs ~30 Hz and render the authoritative state.
+`src/net/transport.ts` (`LocalTransport` / `RealtimeTransport`) holds it all;
+the game loop never knows which is running.
+
+## Layout
 
 ```
-warzone.njakasoa.xyz (this client)
-        │  wss://api.njakasoa.xyz/rt?token=…
-        ▼
-core-api  ──  join/leave room  ·  broadcast game state
+src/
+  core/      framework-agnostic simulation (sim, rng, types, upgrades)
+  net/       transport abstraction (local + realtime) + online connect
+  render/    PixiJS world renderer (orbs, particles, camera)
+  ui.ts      DOM overlay (menu, HUD, upgrade cards, lobby, game over)
+  input.ts   keyboard + pointer steering
+  audio.ts   procedural WebAudio SFX
+  game.ts    orchestrator (loop, events → sfx/fx, level-ups)
+legacy/      the original vanilla Orbhold (reference)
 ```
-
-Each match = one room. The client sends inputs / state; the room broadcasts to
-peers. For an authoritative server (anti-cheat, server-side simulation), the
-game loop moves into a dedicated room handler in core-api.
 
 ## Credits & license
 
-Code: MIT — forked from **Orbhold** by Agent247 / SlopGames
-(`github.com/AgentRateLimit/Orbhold`). See [LICENSE](./LICENSE).
-
-Art assets (their own licenses, attribution kept in-game):
-- *16x16 Puny Characters* — Merchant Shade
-- *Simple Wooden Bow and Arrows* — Arydian
-- *Itemazing Tileset* — Seikio
+MIT — forked from **Orbhold** by Agent247 / SlopGames. See [LICENSE](./LICENSE).
+Art assets (own licenses, attribution kept in-game): *16x16 Puny Characters* by
+Merchant Shade, *Simple Wooden Bow and Arrows* by Arydian, *Itemazing Tileset*
+by Seikio.
