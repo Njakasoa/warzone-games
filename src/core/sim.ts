@@ -75,7 +75,7 @@ function spawnPower(st: GameState, rng: RNG) {
   st.powerups.set(p.id, p);
 }
 
-function speedFactor(size: number): number {
+export function speedFactor(size: number): number {
   return Math.max(0.55, 1 - (size - CFG.player.startSize) / 900);
 }
 
