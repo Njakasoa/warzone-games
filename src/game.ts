@@ -43,25 +43,31 @@ export class Game {
   }
 
   private async beginOnline(name: string) {
-    this.ui.toast("Connecting…");
     const code = (prompt("Room code to join — leave blank to create one:") || "").trim().toUpperCase();
+    const isHost = code.length === 0;
+    const room = isHost ? randomCode() : code;
+
+    // Show the lobby (and the code) right away — it only needs the code, which
+    // we already have. The network connect happens after, so a failure surfaces
+    // here instead of silently bouncing back to a solo game.
+    let started = false;
+    const lobby = this.ui.showLobby({
+      code: room, isHost,
+      onStart: () => { started = true; this.enterMatch(); },
+      onLeave: () => this.menu(),
+    });
+
     try {
-      const isHost = code.length === 0;
-      const room = isHost ? randomCode() : code;
       const { ws, selfId } = await connectOnline(room);
       const rt = new RealtimeTransport({ ws, room, selfId, name, host: isHost, seed: (Math.random() * 1e9) | 0 });
       this.net = rt;
-      const lobby = this.ui.showLobby({
-        code: room, isHost,
-        onStart: () => this.enterMatch(),
-        onLeave: () => this.menu(),
-      });
       rt.onPlayers = (n) => lobby.setCount(n);
-      if (!isHost) this.enterMatch(); // clients jump in; render from snapshots
+      lobby.setStatus(isHost ? "Waiting for players… 1 online" : "Connected — entering match");
+      if (!isHost && !started) this.enterMatch(); // clients jump in; render from snapshots
     } catch (e) {
       console.error(e);
-      this.ui.toast("Online unavailable — playing solo");
-      this.beginSolo(name, 7);
+      const msg = e instanceof Error ? e.message : String(e);
+      lobby.setError(`Couldn't reach the server (${msg}). The API must be up and allow this site's origin (CORS).`);
     }
   }
 
