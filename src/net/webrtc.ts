@@ -79,6 +79,13 @@ export class RtcChannel implements NetChannel {
     }
   }
 
+  /** Guaranteed delivery for rare events (e.g. upgrade picks): always via the
+   *  TCP-reliable signaling WebSocket, never the lossy DataChannel. */
+  sendReliable(data: unknown) {
+    if (this.host) for (const id of this.peers.keys()) this.wsSend({ game: data, to: id });
+    else this.wsSend({ game: data }); // only the host consumes it
+  }
+
   close() {
     for (const p of this.peers.values()) { try { p.dc?.close(); } catch { /* */ } try { p.pc.close(); } catch { /* */ } }
     this.peers.clear();

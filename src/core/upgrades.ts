@@ -54,6 +54,14 @@ export const UPGRADES: Upgrade[] = [
   },
 ];
 
+/** Apply an upgrade by id (used host-side when a client picks one). */
+export function applyUpgradeById(p: Player, id: string): boolean {
+  const u = UPGRADES.find((x) => x.id === id);
+  if (!u) return false;
+  u.apply(p);
+  return true;
+}
+
 /** Deterministic 3-card offer from a roll in [0,1) per slot. */
 export function offer(roll: () => number): Upgrade[] {
   const pool = [...UPGRADES];
