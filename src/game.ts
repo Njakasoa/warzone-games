@@ -16,6 +16,10 @@ export class Game {
   private ui!: UI;
   private net?: NetGame;
   private running = false;
+  private online = false;
+  private session?: { room: string; name: string; isHost: boolean };
+  private soloConfig = { name: "Rookie", bots: 7 };
+  private reconnecting = false;
 
   async start() {
     await this.app.init({
@@ -39,6 +43,8 @@ export class Game {
   }
 
   private beginSolo(name: string, bots: number) {
+    this.online = false;
+    this.soloConfig = { name, bots };
     this.net = new LocalTransport(name, bots);
     this.enterMatch();
   }
@@ -47,6 +53,8 @@ export class Game {
     const code = (prompt("Room code to join — leave blank to create one:") || "").trim().toUpperCase();
     const isHost = code.length === 0;
     const room = isHost ? randomCode() : code;
+    this.online = true;
+    this.session = { room, name, isHost };
 
     // Show the lobby (and the code) right away — it only needs the code, which
     // we already have. The network connect happens after, so a failure surfaces
@@ -59,16 +67,8 @@ export class Game {
     });
 
     try {
-      const { ws, selfId, iceServers } = await connectOnline(room);
-      // WS handles signaling + presence; game traffic goes peer-to-peer (WebRTC),
-      // falling back to the WS relay until/unless a peer connection is established.
-      const channel = new RtcChannel({ ws, selfId, room, host: isHost, iceServers });
-      const rt = new RealtimeTransport({ channel, selfId, name, host: isHost, seed: (Math.random() * 1e9) | 0 });
-      this.net = rt;
+      const rt = await this.connect(room, name, isHost);
       rt.onPlayers = (n) => lobby.setCount(n);
-      // Defer: onLost fires from inside net.update(); tearing down this.net
-      // mid-frame would null it out before the rest of frame() runs.
-      rt.onLost = () => { this.ui.toast("Host left — match ended"); setTimeout(() => this.menu(), 0); };
       lobby.setStatus(isHost ? "Waiting for players… 1 online" : "Connected — entering match");
       if (!isHost && !started) this.enterMatch(); // clients jump in; render from snapshots
     } catch (e) {
@@ -76,6 +76,47 @@ export class Game {
       const msg = e instanceof Error ? e.message : String(e);
       lobby.setError(`Couldn't reach the server (${msg}). The API must be up and allow this site's origin (CORS).`);
     }
+  }
+
+  /** Open + wire an online transport (used by the initial join and by reconnect). */
+  private async connect(room: string, name: string, isHost: boolean): Promise<RealtimeTransport> {
+    const { ws, selfId, iceServers } = await connectOnline(room);
+    // WS handles signaling + presence; game traffic goes peer-to-peer (WebRTC),
+    // falling back to the WS relay until/unless a peer connection is established.
+    const channel = new RtcChannel({ ws, selfId, room, host: isHost, iceServers });
+    const rt = new RealtimeTransport({ channel, selfId, name, host: isHost, seed: (Math.random() * 1e9) | 0 });
+    this.net = rt;
+    // Defer: onLost fires from inside net.update(); tearing down this.net
+    // mid-frame would null it out before the rest of frame() runs.
+    rt.onLost = () => { this.ui.toast("Host left — match ended"); setTimeout(() => this.menu(), 0); };
+    rt.onRestart = () => this.enterMatch(); // host started a rematch in this room
+    channel.onDown(() => void this.handleDown());
+    return rt;
+  }
+
+  /** Client auto-reconnect: the link dropped (e.g. network change). The guest
+   *  token is reused so we keep the same id and the host resumes our orb. */
+  private async handleDown() {
+    if (!this.online || !this.session || this.session.isHost || this.reconnecting) return;
+    this.reconnecting = true;
+    this.ui.toast("Connection lost — reconnecting…");
+    try { this.net?.stop(); } catch { /* */ }
+    this.net = undefined;
+    const { room, name } = this.session;
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      try {
+        await this.connect(room, name, false);
+        this.enterMatch();
+        this.ui.toast("Reconnected");
+        this.reconnecting = false;
+        return;
+      } catch {
+        await new Promise((r) => setTimeout(r, 800 * attempt));
+      }
+    }
+    this.reconnecting = false;
+    this.ui.toast("Couldn't reconnect");
+    this.menu();
   }
 
   private upgradesChosen = 0; // client: level-up picks already made this match
@@ -134,11 +175,39 @@ export class Game {
     if (this.running && state.over) {
       this.running = false;
       sfx.death();
-      this.ui.showGameOver(state, this.net.selfId, () => this.menu());
+      const net = this.net;
+      if (!this.online) {
+        // solo: replay with the same settings
+        this.ui.showGameOver(state, net.selfId, {
+          primaryLabel: "PLAY AGAIN",
+          onPrimary: () => this.beginSolo(this.soloConfig.name, this.soloConfig.bots),
+          onLeave: () => this.menu(),
+        });
+      } else if (net.isSimulating) {
+        // online host: drives the rematch for everyone in the room
+        this.ui.showGameOver(state, net.selfId, {
+          primaryLabel: "REMATCH",
+          onPrimary: () => { net.restart(); this.enterMatch(); },
+          onLeave: () => this.menu(),
+        });
+      } else {
+        // online client: waits for the host to rematch (onRestart re-enters)
+        this.ui.showGameOver(state, net.selfId, {
+          waiting: "Waiting for the host to start a rematch…",
+          onLeave: () => this.menu(),
+        });
+      }
     }
   }
 
-  private stopNet() { this.net?.stop(); this.net = undefined; this.running = false; }
+  private stopNet() {
+    this.net?.stop();
+    this.net = undefined;
+    this.running = false;
+    this.online = false;
+    this.session = undefined;
+    this.reconnecting = false;
+  }
 }
 
 function randomCode(): string {

@@ -150,11 +150,20 @@ export class UI {
   get upgradeOpen() { return !!this.upEl; }
 
   // ── game over ──
-  showGameOver(state: GameState, selfId: string, onReplay: () => void) {
+  showGameOver(state: GameState, selfId: string, opts: {
+    primaryLabel?: string;       // e.g. "PLAY AGAIN" / "REMATCH"
+    onPrimary?: () => void;
+    waiting?: string;            // shown instead of a primary button (online clients)
+    onLeave?: () => void;
+  }) {
     const rank = ranking(state);
     const me = state.players.get(selfId);
     const myRank = rank.findIndex((p) => p.id === selfId) + 1;
     const won = myRank === 1;
+    const actions: El[] = [];
+    if (opts.waiting) actions.push(h("div", { class: "muted" }, opts.waiting));
+    else if (opts.onPrimary) actions.push(h("button", { class: "btn", onclick: () => { sfx.click(); opts.onPrimary!(); } }, opts.primaryLabel ?? "PLAY AGAIN"));
+    if (opts.onLeave) actions.push(h("button", { class: "btn ghost", onclick: () => { sfx.click(); opts.onLeave!(); } }, "LEAVE"));
     this.mount(h("div", { class: "screen" },
       h("div", { class: "veil" }),
       h("div", { class: "card" },
@@ -167,7 +176,7 @@ export class UI {
             h("span", { class: "muted" }, `${Math.round(p.size)} · ${p.kills} KO`),
           )),
         ),
-        h("button", { class: "btn", onclick: () => { sfx.click(); onReplay(); } }, "PLAY AGAIN"),
+        h("div", { class: "row" }, ...actions),
       ),
     ));
   }

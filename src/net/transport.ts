@@ -17,6 +17,8 @@ export interface NetGame {
   update(dt: number, events: SimEvent[]): void;
   /** Apply a level-up upgrade. Solo/host apply locally; clients send it to the host. */
   chooseUpgrade(id: string): void;
+  /** Start a fresh match keeping the same players/room (host-driven online). */
+  restart(): void;
   stop(): void;
 }
 
@@ -51,6 +53,7 @@ export class LocalTransport implements NetGame {
     step(this.state, dt, inputs, events);
   }
   chooseUpgrade() {} // solo applies upgrades locally (see game.ts)
+  restart() {}       // solo restarts by recreating the transport (see game.ts)
   stop() {}
 }
 
@@ -70,6 +73,7 @@ export interface NetChannel {
   sendReliable(data: unknown): void;               // same routing, guaranteed delivery (rare events)
   onMessage(cb: (from: string, data: unknown) => void): void;
   onPeers(cb: (n: number) => void): void;
+  onDown(cb: () => void): void; // fired when the link drops unexpectedly (for reconnect)
   close(): void;
 }
 
@@ -77,7 +81,8 @@ type Msg =
   | { k: "input"; input: Input }
   | { k: "snap"; s: SnapState }
   | { k: "upgrade"; id: string }
-  | { k: "hello"; name: string };
+  | { k: "hello"; name: string }
+  | { k: "restart" };
 
 interface SnapState {
   time: number;
@@ -107,7 +112,8 @@ export class RealtimeTransport implements NetGame {
   private inEvents: SimEvent[] = [];  // client: events from snapshots, drained each frame
   private lastSnap = 0; private gotSnap = false; private lostFired = false;
   onPlayers?: (n: number) => void;
-  onLost?: () => void; // client: host stopped sending (left mid-match)
+  onLost?: () => void;    // client: host stopped sending (left mid-match)
+  onRestart?: () => void; // client: host started a rematch in this room
 
   constructor(opts: { channel: NetChannel; selfId: string; name: string; host: boolean; seed: number }) {
     this.channel = opts.channel;
@@ -149,10 +155,35 @@ export class RealtimeTransport implements NetGame {
       if (p) { applyUpgradeById(p, m.id); if (p.pendingUpgrades > 0) p.pendingUpgrades--; }
     } else if (m.k === "snap" && !this.isSimulating) {
       this.applySnap(m.s);
+    } else if (m.k === "restart" && !this.isSimulating) {
+      // Host began a rematch: drop the game-over state so we don't immediately
+      // re-trigger it, and reset our own level so stale snapshots don't pop
+      // upgrade cards before the fresh state arrives.
+      this.state.over = false;
+      this.lostFired = false;
+      this.lastSnap = performance.now(); // fresh match: don't let the stale timestamp trip the watchdog
+      this.inEvents.length = 0;
+      const me = this.state.players.get(this.selfId);
+      if (me) { me.level = 1; me.xp = 0; }
+      this.onRestart?.();
     }
   }
 
   chooseUpgrade(id: string) { this.channel.sendReliable({ k: "upgrade", id }); }
+
+  /** Host: reset to a fresh match, keeping the same connected players, and tell
+   *  clients to re-enter. */
+  restart() {
+    if (!this.isSimulating) return;
+    const meta = [...this.state.players.values()].map((p) => ({ id: p.id, name: p.name, slot: p.slot }));
+    const pos = spawnRing(Math.max(8, meta.length));
+    const players = meta.map((m, i) => makePlayer(m.id, m.name, m.slot, false, pos[i]!.x, pos[i]!.y));
+    this.state = createState((Math.random() * 1e9) | 0, players);
+    this.remoteInputs.clear();
+    this.snapAccum = 0;
+    this.outEvents.length = 0;
+    this.channel.sendReliable({ k: "restart" });
+  }
 
   pushInput(i: Input) { this.input = i; }
 
