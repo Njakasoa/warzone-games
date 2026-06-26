@@ -18,18 +18,10 @@ import type { NetChannel } from "./transport.ts";
  * (symmetric) NATs; STUN alone covers most home connections.
  */
 
-const ICE: RTCConfiguration = {
-  iceServers: [
-    { urls: (import.meta.env.VITE_STUN_URL as string | undefined) ?? "stun:stun.l.google.com:19302" },
-    ...((import.meta.env.VITE_TURN_URL as string | undefined)
-      ? [{
-          urls: import.meta.env.VITE_TURN_URL as string,
-          username: import.meta.env.VITE_TURN_USER as string | undefined,
-          credential: import.meta.env.VITE_TURN_PASS as string | undefined,
-        }]
-      : []),
-  ],
-};
+// Fallback if no ICE servers are supplied (e.g. signaling-only dev). In normal
+// operation the servers come from core-api's /v1/turn/credentials (Cloudflare
+// TURN), passed into the constructor.
+const DEFAULT_ICE: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
 
 interface Peer {
   pc: RTCPeerConnection;
@@ -56,12 +48,14 @@ export class RtcChannel implements NetChannel {
   private peers = new Map<string, Peer>(); // keyed by the *other* peer's id
   private gameCb?: (from: string, data: unknown) => void;
   private peersCb?: (n: number) => void;
+  private rtc: RTCConfiguration;
 
-  constructor(opts: { ws: WebSocket; selfId: string; room: string; host: boolean }) {
+  constructor(opts: { ws: WebSocket; selfId: string; room: string; host: boolean; iceServers?: RTCIceServer[] }) {
     this.ws = opts.ws;
     this.selfId = opts.selfId;
     this.room = opts.room;
     this.host = opts.host;
+    this.rtc = { iceServers: opts.iceServers?.length ? opts.iceServers : DEFAULT_ICE };
     this.ws.addEventListener("message", (e) => this.onWs(String(e.data)));
     // Announce ourselves so the other side starts the handshake. Both messages
     // are sent so either join order (host first / client first) converges.
@@ -134,7 +128,7 @@ export class RtcChannel implements NetChannel {
   }
 
   private newPeer(peerId: string): Peer {
-    const pc = new RTCPeerConnection(ICE);
+    const pc = new RTCPeerConnection(this.rtc);
     const peer: Peer = { pc, remoteSet: false, pendingIce: [] };
     pc.onicecandidate = (e) => { if (e.candidate) this.signal({ sig: "ice", to: peerId, candidate: e.candidate.toJSON() }); };
     pc.onconnectionstatechange = () => {
