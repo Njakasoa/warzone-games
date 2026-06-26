@@ -174,7 +174,8 @@ export class UI {
 
   // ── online lobby ──
   showLobby(o: { code: string; isHost: boolean; onStart: () => void; onLeave: () => void }) {
-    const count = h("div", { class: "tag" }, "Waiting for players… 1 online");
+    const count = h("div", { class: "tag" }, "Connecting…");
+    const err = h("div", { class: "tag", style: "margin-top:8px;color:#ff6b6b;display:none" });
     this.mount(h("div", { class: "screen" },
       h("div", { class: "veil" }),
       h("div", { class: "card" },
@@ -182,13 +183,18 @@ export class UI {
         h("div", { class: "tag", style: "margin:12px 0" }, "Share this room code with friends"),
         h("div", { class: "code" }, o.code),
         count,
+        err,
         h("div", { class: "row", style: "margin-top:22px" },
           o.isHost ? h("button", { class: "btn", onclick: o.onStart }, "START MATCH") : h("div", { class: "muted" }, "Waiting for host to start…"),
           h("button", { class: "btn ghost", onclick: o.onLeave }, "LEAVE"),
         ),
       ),
     ));
-    return { setCount: (n: number) => (count.textContent = `${n} online`) };
+    return {
+      setCount: (n: number) => (count.textContent = `${n} online`),
+      setStatus: (s: string) => (count.textContent = s),
+      setError: (s: string) => { err.textContent = s; err.style.display = "block"; },
+    };
   }
 
   toast(msg: string) {
