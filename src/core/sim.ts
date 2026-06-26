@@ -1,4 +1,4 @@
-import { CFG } from "../config.ts";
+import { CFG, SLOT_COLORS } from "../config.ts";
 import { RNG } from "./rng.ts";
 import { UPGRADES } from "./upgrades.ts";
 import type {
@@ -205,6 +205,10 @@ export function step(
       const amt = small.size * CFG.combat.transferRate * dt * (1 - small.armor);
       small.size -= amt;
       big.size += amt * 0.55;
+      // bite feedback (throttled so continuous contact doesn't spam particles)
+      if (rng.next() < dt * 8) {
+        events.push({ t: "eat", x: small.x, y: small.y, color: SLOT_COLORS[big.slot % SLOT_COLORS.length]! });
+      }
       if (small.size <= CFG.player.startSize * 0.6) {
         killPlayer(st, small, big, events, rng);
       }
