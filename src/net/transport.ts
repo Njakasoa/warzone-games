@@ -1,5 +1,6 @@
 import { CFG } from "../config.ts";
 import { createState, makePlayer, speedFactor, step, type SimEvent } from "../core/sim.ts";
+import { applyUpgradeById } from "../core/upgrades.ts";
 import type { GameState, Input, Player } from "../core/types.ts";
 
 /**
@@ -14,6 +15,8 @@ export interface NetGame {
   isSimulating: boolean; // solo or host
   pushInput(input: Input): void;
   update(dt: number, events: SimEvent[]): void;
+  /** Apply a level-up upgrade. Solo/host apply locally; clients send it to the host. */
+  chooseUpgrade(id: string): void;
   stop(): void;
 }
 
@@ -47,6 +50,7 @@ export class LocalTransport implements NetGame {
     const inputs = new Map<string, Input>([[this.selfId, this.input]]);
     step(this.state, dt, inputs, events);
   }
+  chooseUpgrade() {} // solo applies upgrades locally (see game.ts)
   stop() {}
 }
 
@@ -62,7 +66,8 @@ export const BOT_NAMES = [
  */
 export interface NetChannel {
   readonly selfId: string;
-  send(data: unknown): void;                       // host → all clients, client → host
+  send(data: unknown): void;                       // host → all clients, client → host (fast path)
+  sendReliable(data: unknown): void;               // same routing, guaranteed delivery (rare events)
   onMessage(cb: (from: string, data: unknown) => void): void;
   onPeers(cb: (n: number) => void): void;
   close(): void;
@@ -70,7 +75,8 @@ export interface NetChannel {
 
 type Msg =
   | { k: "input"; input: Input }
-  | { k: "snap"; s: SnapState };
+  | { k: "snap"; s: SnapState }
+  | { k: "upgrade"; id: string };
 
 interface SnapState {
   time: number;
@@ -120,10 +126,16 @@ export class RealtimeTransport implements NetGame {
         const r = spawnRing(8)[(this.state.players.size) % 8]!;
         this.state.players.set(from, makePlayer(from, "P" + this.state.players.size, this.state.players.size, false, r.x, r.y));
       }
+    } else if (m.k === "upgrade" && this.isSimulating) {
+      // A client picked a level-up upgrade; apply it authoritatively to its orb.
+      const p = this.state.players.get(from);
+      if (p) { applyUpgradeById(p, m.id); if (p.pendingUpgrades > 0) p.pendingUpgrades--; }
     } else if (m.k === "snap" && !this.isSimulating) {
       this.applySnap(m.s);
     }
   }
+
+  chooseUpgrade(id: string) { this.channel.sendReliable({ k: "upgrade", id }); }
 
   pushInput(i: Input) { this.input = i; }
 

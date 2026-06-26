@@ -75,15 +75,21 @@ export class Game {
     }
   }
 
+  private upgradesChosen = 0; // client: level-up picks already made this match
+  private overFlush = 0;      // host: time spent broadcasting the final (over) state
+
   private enterMatch() {
     this.ui.enterHud(() => this.menu());
     this.running = true;
+    this.upgradesChosen = 0;
+    this.overFlush = 0;
   }
 
   private frame(dtRaw: number) {
     const dt = Math.min(0.05, dtRaw); // clamp to avoid tunneling on tab-out
     if (!this.net) return;
     const state = this.net.state;
+    const sim = this.net.isSimulating;
 
     if (this.running && !this.ui.upgradeOpen) {
       this.net.pushInput(this.controls.sample());
@@ -97,16 +103,29 @@ export class Game {
         else if (e.t === "power") sfx.power();
         else if (e.t === "level" && e.id === this.net.selfId) sfx.level();
       }
+    } else if (sim && state.over && this.overFlush < 3) {
+      // Match ended: keep broadcasting the final snapshot for a few seconds so
+      // clients reliably receive over=true (the DataChannel is unreliable).
+      this.overFlush += dt;
+      this.net.update(dt, []);
     }
 
     this.world.draw(state, this.net.selfId, dt);
     if (this.running) this.ui.updateHud(state, this.net.selfId);
 
-    // level-up cards (local human only, solo pauses while choosing)
+    // level-up cards. Host/solo apply locally; clients owe one pick per level
+    // gained and the host applies the chosen upgrade authoritatively.
     const me = state.players.get(this.net.selfId);
-    if (this.running && me && me.pendingUpgrades > 0 && !this.ui.upgradeOpen) {
-      const cards = offer(Math.random);
-      this.ui.showUpgrades(cards, (u) => { u.apply(me); me.pendingUpgrades--; });
+    if (this.running && me && !this.ui.upgradeOpen) {
+      if (sim) {
+        if (me.pendingUpgrades > 0) {
+          const cards = offer(Math.random);
+          this.ui.showUpgrades(cards, (u) => { u.apply(me); me.pendingUpgrades--; });
+        }
+      } else if (me.level - 1 > this.upgradesChosen) {
+        const cards = offer(Math.random);
+        this.ui.showUpgrades(cards, (u) => { this.upgradesChosen++; this.net!.chooseUpgrade(u.id); });
+      }
     }
 
     if (this.running && state.over) {
