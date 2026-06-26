@@ -7,6 +7,7 @@ import { offer } from "./core/upgrades.ts";
 import type { SimEvent } from "./core/sim.ts";
 import { LocalTransport, RealtimeTransport, type NetGame } from "./net/transport.ts";
 import { connectOnline } from "./net/online.ts";
+import { RtcChannel } from "./net/webrtc.ts";
 
 export class Game {
   private app = new Application();
@@ -59,7 +60,10 @@ export class Game {
 
     try {
       const { ws, selfId } = await connectOnline(room);
-      const rt = new RealtimeTransport({ ws, room, selfId, name, host: isHost, seed: (Math.random() * 1e9) | 0 });
+      // WS handles signaling + presence; game traffic goes peer-to-peer (WebRTC),
+      // falling back to the WS relay until/unless a peer connection is established.
+      const channel = new RtcChannel({ ws, selfId, room, host: isHost });
+      const rt = new RealtimeTransport({ channel, selfId, name, host: isHost, seed: (Math.random() * 1e9) | 0 });
       this.net = rt;
       rt.onPlayers = (n) => lobby.setCount(n);
       lobby.setStatus(isHost ? "Waiting for players… 1 online" : "Connected — entering match");

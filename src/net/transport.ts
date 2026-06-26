@@ -54,11 +54,23 @@ export const BOT_NAMES = [
   "Vex", "Nyx", "Kilo", "Rook", "Mara", "Zenn", "Bolt", "Onyx", "Pyra", "Drift",
 ];
 
-// ── Online: host-authoritative over core-api /rt ───────────
+// ── Online: host-authoritative ─────────────────────────────
+/**
+ * The wire transport under RealtimeTransport. `WsChannel` relays everything
+ * through the server; `RtcChannel` (see webrtc.ts) carries game traffic peer
+ * to peer. Swapping one for the other changes nothing in the game logic.
+ */
+export interface NetChannel {
+  readonly selfId: string;
+  send(data: unknown): void;                       // host → all clients, client → host
+  onMessage(cb: (from: string, data: unknown) => void): void;
+  onPeers(cb: (n: number) => void): void;
+  close(): void;
+}
+
 type Msg =
-  | { k: "input"; from: string; input: Input }
-  | { k: "snap"; s: SnapState }
-  | { k: "hello"; name: string };
+  | { k: "input"; input: Input }
+  | { k: "snap"; s: SnapState };
 
 interface SnapState {
   time: number;
@@ -72,8 +84,7 @@ export class RealtimeTransport implements NetGame {
   selfId: string;
   state: GameState;
   isSimulating = false; // becomes true if we are host
-  private ws: WebSocket;
-  private room: string;
+  private channel: NetChannel;
   private input: Input = { dx: 0, dy: 0, dash: false };
   private remoteInputs = new Map<string, Input>();
   private snapAccum = 0;
@@ -85,9 +96,8 @@ export class RealtimeTransport implements NetGame {
   private targets = new Map<string, { x: number; y: number }>();
   onPlayers?: (n: number) => void;
 
-  constructor(opts: { ws: WebSocket; room: string; selfId: string; name: string; host: boolean; seed: number }) {
-    this.ws = opts.ws;
-    this.room = opts.room;
+  constructor(opts: { channel: NetChannel; selfId: string; name: string; host: boolean; seed: number }) {
+    this.channel = opts.channel;
     this.selfId = opts.selfId;
     this.isSimulating = opts.host;
     const players: Player[] = [];
@@ -97,25 +107,18 @@ export class RealtimeTransport implements NetGame {
     }
     this.state = createState(opts.seed, players);
 
-    this.ws.addEventListener("message", (e) => this.onMessage(String(e.data)));
-    this.send({ k: "hello", name: opts.name });
+    this.channel.onMessage((from, data) => this.onMessage(from, data as Msg));
+    this.channel.onPeers((n) => this.onPlayers?.(n));
   }
 
-  private send(m: Msg) {
-    this.ws.send(JSON.stringify({ type: "broadcast", room: this.room, data: m }));
-  }
+  private send(m: Msg) { this.channel.send(m); }
 
-  private onMessage(raw: string) {
-    let env: { type?: string; from?: string; data?: Msg; count?: number };
-    try { env = JSON.parse(raw); } catch { return; }
-    if (env.type === "presence" && this.onPlayers) this.onPlayers(env.count ?? 1);
-    if (env.type !== "message" || !env.data) return;
-    const m = env.data;
+  private onMessage(from: string, m: Msg) {
     if (m.k === "input" && this.isSimulating) {
-      this.remoteInputs.set(m.from, m.input);
-      if (!this.state.players.has(m.from)) {
+      this.remoteInputs.set(from, m.input);
+      if (!this.state.players.has(from)) {
         const r = spawnRing(8)[(this.state.players.size) % 8]!;
-        this.state.players.set(m.from, makePlayer(m.from, "P" + this.state.players.size, this.state.players.size, false, r.x, r.y));
+        this.state.players.set(from, makePlayer(from, "P" + this.state.players.size, this.state.players.size, false, r.x, r.y));
       }
     } else if (m.k === "snap" && !this.isSimulating) {
       this.applySnap(m.s);
@@ -133,7 +136,7 @@ export class RealtimeTransport implements NetGame {
       if (this.snapAccum >= 1 / 20) { this.snapAccum = 0; this.send({ k: "snap", s: this.snapshot() }); }
     } else {
       this.inputAccum += dt;
-      if (this.inputAccum >= 1 / 30) { this.inputAccum = 0; this.send({ k: "input", from: this.selfId, input: this.input }); }
+      if (this.inputAccum >= 1 / 30) { this.inputAccum = 0; this.send({ k: "input", input: this.input }); }
       this.interpolate(dt);
     }
   }
@@ -213,5 +216,5 @@ export class RealtimeTransport implements NetGame {
     for (const [id, x, y, kind] of s.powerups) this.state.powerups.set(id, { id, x, y, kind: kind as never });
   }
 
-  stop() { try { this.ws.close(); } catch {} }
+  stop() { this.channel.close(); }
 }
