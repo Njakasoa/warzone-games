@@ -1,5 +1,5 @@
 import { CFG } from "../config.ts";
-import { createState, makePlayer, step, type SimEvent } from "../core/sim.ts";
+import { createState, makePlayer, speedFactor, step, type SimEvent } from "../core/sim.ts";
 import type { GameState, Input, Player } from "../core/types.ts";
 
 /**
@@ -78,6 +78,11 @@ export class RealtimeTransport implements NetGame {
   private remoteInputs = new Map<string, Input>();
   private snapAccum = 0;
   private inputAccum = 0;
+  // Latest authoritative position per player, applied gradually in update():
+  // remote orbs interpolate toward it, our own orb (locally predicted) is
+  // gently corrected toward it. This is what keeps clients smooth between the
+  // host's snapshots instead of freezing then jumping.
+  private targets = new Map<string, { x: number; y: number }>();
   onPlayers?: (n: number) => void;
 
   constructor(opts: { ws: WebSocket; room: string; selfId: string; name: string; host: boolean; seed: number }) {
@@ -125,11 +130,51 @@ export class RealtimeTransport implements NetGame {
       inputs.set(this.selfId, this.input);
       step(this.state, dt, inputs, events);
       this.snapAccum += dt;
-      if (this.snapAccum >= 1 / 15) { this.snapAccum = 0; this.send({ k: "snap", s: this.snapshot() }); }
+      if (this.snapAccum >= 1 / 20) { this.snapAccum = 0; this.send({ k: "snap", s: this.snapshot() }); }
     } else {
       this.inputAccum += dt;
       if (this.inputAccum >= 1 / 30) { this.inputAccum = 0; this.send({ k: "input", from: this.selfId, input: this.input }); }
+      this.interpolate(dt);
     }
+  }
+
+  // ── client smoothing: runs every render frame ──
+  private interpolate(dt: number) {
+    const follow = 1 - Math.exp(-dt * 14);  // remote orbs chase authoritative pos
+    const correct = 1 - Math.exp(-dt * 2.5); // gently reconcile predicted self
+    for (const p of this.state.players.values()) {
+      const tgt = this.targets.get(p.id);
+      if (!tgt) continue;
+      if (p.id === this.selfId) {
+        if (p.alive) this.predictSelf(p, dt); // instant response to our own input
+        p.x += (tgt.x - p.x) * correct;
+        p.y += (tgt.y - p.y) * correct;
+      } else {
+        p.x += (tgt.x - p.x) * follow;
+        p.y += (tgt.y - p.y) * follow;
+      }
+    }
+  }
+
+  // Integrate our own orb locally from the live input, mirroring sim movement,
+  // so it doesn't wait for the input→host→snapshot round trip. The server stays
+  // authoritative for size/level/eats/death (carried in snapshots) and for the
+  // gentle position correction above.
+  private predictSelf(p: Player, dt: number) {
+    let dx = this.input.dx, dy = this.input.dy;
+    const m = Math.hypot(dx, dy);
+    if (m > 1) { dx /= m; dy /= m; }
+    const boost = p.fx.boost ? 1.55 : 1;
+    const spd = CFG.player.baseSpeed * p.speedMul * speedFactor(p.size) * boost;
+    p.vx += (dx * spd - p.vx) * Math.min(1, dt * 10);
+    p.vy += (dy * spd - p.vy) * Math.min(1, dt * 10);
+    if (p.dashCd > 0) p.dashCd -= dt;
+    if (this.input.dash && p.dashCd <= 0 && m > 0.1) {
+      p.vx += dx * 520; p.vy += dy * 520;
+      p.dashCd = 2.6; p.fx.dashTrail = 0.25;
+    }
+    p.x = Math.max(20, Math.min(CFG.world.w - 20, p.x + p.vx * dt));
+    p.y = Math.max(20, Math.min(CFG.world.h - 20, p.y + p.vy * dt));
   }
 
   private snapshot(): SnapState {
@@ -151,13 +196,17 @@ export class RealtimeTransport implements NetGame {
     for (const ps of s.players) {
       seen.add(ps.id);
       let p = this.state.players.get(ps.id);
-      if (!p) { p = makePlayer(ps.id, ps.name, ps.slot, ps.id !== this.selfId, ps.x, ps.y); this.state.players.set(ps.id, p); }
-      // lerp toward authoritative pos for smoothness
-      p.x += (ps.x - p.x) * 0.4; p.y += (ps.y - p.y) * 0.4;
+      if (!p) {
+        // first sighting: place it exactly so it doesn't ease in from (0,0)
+        p = makePlayer(ps.id, ps.name, ps.slot, ps.id !== this.selfId, ps.x, ps.y);
+        this.state.players.set(ps.id, p);
+      }
+      // Record authoritative pos; update() eases positions toward it every frame.
+      this.targets.set(ps.id, { x: ps.x, y: ps.y });
       p.size = ps.size; p.level = ps.level; p.kills = ps.kills; p.alive = ps.alive; p.name = ps.name;
       p.fx = Object.fromEntries(ps.fx.map((k) => [k, 1]));
     }
-    for (const id of [...this.state.players.keys()]) if (!seen.has(id)) this.state.players.delete(id);
+    for (const id of [...this.state.players.keys()]) if (!seen.has(id)) { this.state.players.delete(id); this.targets.delete(id); }
     this.state.slimes.clear();
     for (const [id, x, y, kind] of s.slimes) this.state.slimes.set(id, { id, x, y, kind });
     this.state.powerups.clear();
