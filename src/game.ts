@@ -59,10 +59,10 @@ export class Game {
     });
 
     try {
-      const { ws, selfId } = await connectOnline(room);
+      const { ws, selfId, iceServers } = await connectOnline(room);
       // WS handles signaling + presence; game traffic goes peer-to-peer (WebRTC),
       // falling back to the WS relay until/unless a peer connection is established.
-      const channel = new RtcChannel({ ws, selfId, room, host: isHost });
+      const channel = new RtcChannel({ ws, selfId, room, host: isHost, iceServers });
       const rt = new RealtimeTransport({ channel, selfId, name, host: isHost, seed: (Math.random() * 1e9) | 0 });
       this.net = rt;
       rt.onPlayers = (n) => lobby.setCount(n);
