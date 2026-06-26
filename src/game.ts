@@ -66,6 +66,9 @@ export class Game {
       const rt = new RealtimeTransport({ channel, selfId, name, host: isHost, seed: (Math.random() * 1e9) | 0 });
       this.net = rt;
       rt.onPlayers = (n) => lobby.setCount(n);
+      // Defer: onLost fires from inside net.update(); tearing down this.net
+      // mid-frame would null it out before the rest of frame() runs.
+      rt.onLost = () => { this.ui.toast("Host left — match ended"); setTimeout(() => this.menu(), 0); };
       lobby.setStatus(isHost ? "Waiting for players… 1 online" : "Connected — entering match");
       if (!isHost && !started) this.enterMatch(); // clients jump in; render from snapshots
     } catch (e) {

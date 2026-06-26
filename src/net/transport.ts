@@ -76,14 +76,16 @@ export interface NetChannel {
 type Msg =
   | { k: "input"; input: Input }
   | { k: "snap"; s: SnapState }
-  | { k: "upgrade"; id: string };
+  | { k: "upgrade"; id: string }
+  | { k: "hello"; name: string };
 
 interface SnapState {
   time: number;
   over: boolean;
-  players: Array<Pick<Player, "id" | "name" | "slot" | "x" | "y" | "size" | "level" | "kills" | "alive"> & { fx: string[] }>;
+  players: Array<Pick<Player, "id" | "name" | "slot" | "x" | "y" | "size" | "level" | "xp" | "kills" | "alive"> & { fx: string[] }>;
   slimes: Array<[number, number, number, number]>; // id,x,y,kind
   powerups: Array<[number, number, number, string]>;
+  events: SimEvent[]; // combat/powerup feedback since the last snapshot (no slime pickups)
 }
 
 export class RealtimeTransport implements NetGame {
@@ -100,7 +102,12 @@ export class RealtimeTransport implements NetGame {
   // gently corrected toward it. This is what keeps clients smooth between the
   // host's snapshots instead of freezing then jumping.
   private targets = new Map<string, { x: number; y: number }>();
+  private pendingNames = new Map<string, string>(); // host: client id → chosen callsign
+  private outEvents: SimEvent[] = []; // host: events queued for the next snapshot
+  private inEvents: SimEvent[] = [];  // client: events from snapshots, drained each frame
+  private lastSnap = 0; private gotSnap = false; private lostFired = false;
   onPlayers?: (n: number) => void;
+  onLost?: () => void; // client: host stopped sending (left mid-match)
 
   constructor(opts: { channel: NetChannel; selfId: string; name: string; host: boolean; seed: number }) {
     this.channel = opts.channel;
@@ -115,6 +122,9 @@ export class RealtimeTransport implements NetGame {
 
     this.channel.onMessage((from, data) => this.onMessage(from, data as Msg));
     this.channel.onPeers((n) => this.onPlayers?.(n));
+
+    // Clients tell the host their callsign (reliably) so we don't show "P1" etc.
+    if (!opts.host) this.channel.sendReliable({ k: "hello", name: opts.name });
   }
 
   private send(m: Msg) { this.channel.send(m); }
@@ -124,8 +134,15 @@ export class RealtimeTransport implements NetGame {
       this.remoteInputs.set(from, m.input);
       if (!this.state.players.has(from)) {
         const r = spawnRing(8)[(this.state.players.size) % 8]!;
-        this.state.players.set(from, makePlayer(from, "P" + this.state.players.size, this.state.players.size, false, r.x, r.y));
+        const name = this.pendingNames.get(from) ?? "P" + this.state.players.size;
+        this.state.players.set(from, makePlayer(from, name, this.state.players.size, false, r.x, r.y));
       }
+    } else if (m.k === "hello" && this.isSimulating) {
+      // Remember (and apply) the client's chosen callsign.
+      const name = String(m.name).slice(0, 12) || "Rookie";
+      this.pendingNames.set(from, name);
+      const p = this.state.players.get(from);
+      if (p) p.name = name;
     } else if (m.k === "upgrade" && this.isSimulating) {
       // A client picked a level-up upgrade; apply it authoritatively to its orb.
       const p = this.state.players.get(from);
@@ -144,12 +161,22 @@ export class RealtimeTransport implements NetGame {
       const inputs = new Map<string, Input>(this.remoteInputs);
       inputs.set(this.selfId, this.input);
       step(this.state, dt, inputs, events);
+      // queue impactful events (not slime sparkles) to forward to clients
+      for (const e of events) if (e.t !== "pickup") this.outEvents.push(e);
+      if (this.outEvents.length > 40) this.outEvents.splice(0, this.outEvents.length - 40);
       this.snapAccum += dt;
       if (this.snapAccum >= 1 / 20) { this.snapAccum = 0; this.send({ k: "snap", s: this.snapshot() }); }
     } else {
       this.inputAccum += dt;
       if (this.inputAccum >= 1 / 30) { this.inputAccum = 0; this.send({ k: "input", input: this.input }); }
       this.interpolate(dt);
+      // surface host events to the renderer (particles + sfx)
+      if (this.inEvents.length) { for (const e of this.inEvents) events.push(e); this.inEvents.length = 0; }
+      // watchdog: host stopped sending mid-match → it left
+      if (this.gotSnap && !this.lostFired && !this.state.over &&
+          performance.now() - this.lastSnap > 5000) {
+        this.lostFired = true; this.onLost?.();
+      }
     }
   }
 
@@ -197,11 +224,12 @@ export class RealtimeTransport implements NetGame {
       time: this.state.time, over: this.state.over,
       players: [...this.state.players.values()].map((p) => ({
         id: p.id, name: p.name, slot: p.slot, x: Math.round(p.x), y: Math.round(p.y),
-        size: Math.round(p.size * 10) / 10, level: p.level, kills: p.kills, alive: p.alive,
+        size: Math.round(p.size * 10) / 10, level: p.level, xp: Math.round(p.xp), kills: p.kills, alive: p.alive,
         fx: Object.keys(p.fx),
       })),
       slimes: [...this.state.slimes.values()].map((s) => [s.id, Math.round(s.x), Math.round(s.y), s.kind] as [number, number, number, number]),
       powerups: [...this.state.powerups.values()].map((u) => [u.id, Math.round(u.x), Math.round(u.y), u.kind] as [number, number, number, string]),
+      events: this.outEvents.splice(0), // hand off + clear
     };
   }
 
@@ -216,9 +244,15 @@ export class RealtimeTransport implements NetGame {
         p = makePlayer(ps.id, ps.name, ps.slot, ps.id !== this.selfId, ps.x, ps.y);
         this.state.players.set(ps.id, p);
       }
+      // A large jump means a teleport (respawn) — snap rather than slide the
+      // orb across the arena. Small deltas keep easing for smoothness.
+      if (Math.hypot(ps.x - p.x, ps.y - p.y) > 350) {
+        p.x = ps.x; p.y = ps.y;
+        if (p.id === this.selfId) { p.vx = 0; p.vy = 0; }
+      }
       // Record authoritative pos; update() eases positions toward it every frame.
       this.targets.set(ps.id, { x: ps.x, y: ps.y });
-      p.size = ps.size; p.level = ps.level; p.kills = ps.kills; p.alive = ps.alive; p.name = ps.name;
+      p.size = ps.size; p.level = ps.level; p.xp = ps.xp; p.kills = ps.kills; p.alive = ps.alive; p.name = ps.name;
       p.fx = Object.fromEntries(ps.fx.map((k) => [k, 1]));
     }
     for (const id of [...this.state.players.keys()]) if (!seen.has(id)) { this.state.players.delete(id); this.targets.delete(id); }
@@ -226,6 +260,8 @@ export class RealtimeTransport implements NetGame {
     for (const [id, x, y, kind] of s.slimes) this.state.slimes.set(id, { id, x, y, kind });
     this.state.powerups.clear();
     for (const [id, x, y, kind] of s.powerups) this.state.powerups.set(id, { id, x, y, kind: kind as never });
+    if (s.events?.length) { this.inEvents.push(...s.events); if (this.inEvents.length > 80) this.inEvents.splice(0, this.inEvents.length - 80); }
+    this.lastSnap = performance.now(); this.gotSnap = true;
   }
 
   stop() { this.channel.close(); }
