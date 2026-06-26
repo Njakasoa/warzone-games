@@ -111,7 +111,9 @@ export class RealtimeTransport implements NetGame {
   private outEvents: SimEvent[] = []; // host: events queued for the next snapshot
   private inEvents: SimEvent[] = [];  // client: events from snapshots, drained each frame
   private lastSnap = 0; private gotSnap = false; private lostFired = false;
+  private readyFired = false;
   onPlayers?: (n: number) => void;
+  onReady?: () => void;   // client: first authoritative snapshot containing self
   onLost?: () => void;    // client: host stopped sending (left mid-match)
   onRestart?: () => void; // client: host started a rematch in this room
 
@@ -133,22 +135,19 @@ export class RealtimeTransport implements NetGame {
     if (!opts.host) this.channel.sendReliable({ k: "hello", name: opts.name });
   }
 
+  get ready() { return this.isSimulating || (this.gotSnap && this.state.players.has(this.selfId)); }
+
   private send(m: Msg) { this.channel.send(m); }
 
   private onMessage(from: string, m: Msg) {
     if (m.k === "input" && this.isSimulating) {
       this.remoteInputs.set(from, m.input);
-      if (!this.state.players.has(from)) {
-        const r = spawnRing(8)[(this.state.players.size) % 8]!;
-        const name = this.pendingNames.get(from) ?? "P" + this.state.players.size;
-        this.state.players.set(from, makePlayer(from, name, this.state.players.size, false, r.x, r.y));
-      }
+      this.ensureRemotePlayer(from);
     } else if (m.k === "hello" && this.isSimulating) {
       // Remember (and apply) the client's chosen callsign.
       const name = String(m.name).slice(0, 12) || "Rookie";
       this.pendingNames.set(from, name);
-      const p = this.state.players.get(from);
-      if (p) p.name = name;
+      this.ensureRemotePlayer(from, name);
     } else if (m.k === "upgrade" && this.isSimulating) {
       // A client picked a level-up upgrade; apply it authoritatively to its orb.
       const p = this.state.players.get(from);
@@ -167,6 +166,17 @@ export class RealtimeTransport implements NetGame {
       if (me) { me.level = 1; me.xp = 0; }
       this.onRestart?.();
     }
+  }
+
+  private ensureRemotePlayer(id: string, name = this.pendingNames.get(id) ?? "P" + this.state.players.size) {
+    let p = this.state.players.get(id);
+    if (p) { p.name = name; return p; }
+    const slot = this.state.players.size;
+    const pos = spawnRing(Math.max(8, slot + 1));
+    const r = pos[slot] ?? pos[slot % pos.length]!;
+    p = makePlayer(id, name, slot, false, r.x, r.y);
+    this.state.players.set(id, p);
+    return p;
   }
 
   chooseUpgrade(id: string) { this.channel.sendReliable({ k: "upgrade", id }); }
@@ -293,6 +303,10 @@ export class RealtimeTransport implements NetGame {
     for (const [id, x, y, kind] of s.powerups) this.state.powerups.set(id, { id, x, y, kind: kind as never });
     if (s.events?.length) { this.inEvents.push(...s.events); if (this.inEvents.length > 80) this.inEvents.splice(0, this.inEvents.length - 80); }
     this.lastSnap = performance.now(); this.gotSnap = true;
+    if (!this.readyFired && this.state.players.has(this.selfId)) {
+      this.readyFired = true;
+      this.onReady?.();
+    }
   }
 
   stop() { this.channel.close(); }
