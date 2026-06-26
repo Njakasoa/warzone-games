@@ -28,12 +28,13 @@ interface Peer {
   dc?: RTCDataChannel;
   remoteSet: boolean;
   pendingIce: RTCIceCandidateInit[];
+  epoch?: number; // host: which client connection this peer belongs to
 }
 
 // Signaling/relay envelopes carried inside the WS `broadcast` data field.
 type Sig =
   | { sig: "host-here" }
-  | { sig: "join-rtc" }
+  | { sig: "join-rtc"; epoch: number }
   | { sig: "offer"; to: string; desc: RTCSessionDescriptionInit }
   | { sig: "answer"; to: string; desc: RTCSessionDescriptionInit }
   | { sig: "ice"; to: string; candidate: RTCIceCandidateInit }
@@ -48,7 +49,10 @@ export class RtcChannel implements NetChannel {
   private peers = new Map<string, Peer>(); // keyed by the *other* peer's id
   private gameCb?: (from: string, data: unknown) => void;
   private peersCb?: (n: number) => void;
+  private downCb?: () => void;
   private rtc: RTCConfiguration;
+  private closed = false; // true once we intentionally close (suppresses onDown)
+  private epoch = (Math.random() * 1e9) | 0; // identifies this connection across reconnects
 
   constructor(opts: { ws: WebSocket; selfId: string; room: string; host: boolean; iceServers?: RTCIceServer[] }) {
     this.ws = opts.ws;
@@ -57,13 +61,15 @@ export class RtcChannel implements NetChannel {
     this.host = opts.host;
     this.rtc = { iceServers: opts.iceServers?.length ? opts.iceServers : DEFAULT_ICE };
     this.ws.addEventListener("message", (e) => this.onWs(String(e.data)));
+    this.ws.addEventListener("close", () => { if (!this.closed) this.downCb?.(); });
     // Announce ourselves so the other side starts the handshake. Both messages
     // are sent so either join order (host first / client first) converges.
-    this.signal(this.host ? { sig: "host-here" } : { sig: "join-rtc" });
+    this.signal(this.host ? { sig: "host-here" } : { sig: "join-rtc", epoch: this.epoch });
   }
 
   onMessage(cb: (from: string, data: unknown) => void) { this.gameCb = cb; }
   onPeers(cb: (n: number) => void) { this.peersCb = cb; }
+  onDown(cb: () => void) { this.downCb = cb; }
 
   /** Send a game message to our counterpart(s): host → every client, client → host. */
   send(data: unknown) {
@@ -87,6 +93,7 @@ export class RtcChannel implements NetChannel {
   }
 
   close() {
+    this.closed = true;
     for (const p of this.peers.values()) { try { p.dc?.close(); } catch { /* */ } try { p.pc.close(); } catch { /* */ } }
     this.peers.clear();
     try { this.ws.close(); } catch { /* */ }
@@ -113,11 +120,16 @@ export class RtcChannel implements NetChannel {
   private onSignal(from: string, d: Extract<Sig, { sig: string }>) {
     switch (d.sig) {
       case "host-here":
-        if (!this.host && !this.peers.has(from)) this.signal({ sig: "join-rtc" });
+        if (!this.host && !this.peers.has(from)) this.signal({ sig: "join-rtc", epoch: this.epoch });
         break;
-      case "join-rtc":
-        if (this.host && !this.peers.has(from)) void this.hostOffer(from);
+      case "join-rtc": {
+        if (!this.host) break;
+        const ex = this.peers.get(from);
+        if (ex && ex.epoch === d.epoch) break; // duplicate of the current handshake — ignore
+        if (ex) { try { ex.dc?.close(); ex.pc.close(); } catch { /* */ } this.peers.delete(from); } // reconnect
+        void this.hostOffer(from, d.epoch);
         break;
+      }
       case "offer":
         if (!this.host && d.to === this.selfId && !this.peers.has(from)) void this.clientAnswer(from, d.desc);
         break;
@@ -141,15 +153,18 @@ export class RtcChannel implements NetChannel {
     pc.onconnectionstatechange = () => {
       if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {
         try { peer.dc?.close(); } catch { /* */ }
-        this.peers.delete(peerId);
+        // Only forget it if it's still the current peer — a replaced (reconnect)
+        // peer's late close must not evict the fresh one under the same id.
+        if (this.peers.get(peerId) === peer) this.peers.delete(peerId);
       }
     };
     this.peers.set(peerId, peer);
     return peer;
   }
 
-  private async hostOffer(clientId: string) {
+  private async hostOffer(clientId: string, epoch: number) {
     const peer = this.newPeer(clientId);
+    peer.epoch = epoch;
     // Unreliable + unordered: realtime snapshots, no head-of-line blocking.
     const dc = peer.pc.createDataChannel("game", { ordered: false, maxRetransmits: 0 });
     this.wireDc(peer, dc, clientId);

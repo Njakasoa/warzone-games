@@ -10,10 +10,7 @@ const API_BASE =
 export async function connectOnline(
   room: string,
 ): Promise<{ ws: WebSocket; selfId: string; iceServers: RTCIceServer[] }> {
-  const res = await fetch(`${API_BASE}/v1/auth/guest`, { method: "POST" });
-  if (!res.ok) throw new Error(`guest auth failed: ${res.status}`);
-  const { accessToken } = (await res.json()) as { accessToken: string };
-
+  const accessToken = await guestToken();
   const iceServers = await fetchIceServers(accessToken);
 
   const wsUrl = `${API_BASE.replace(/^http/, "ws")}/rt?token=${encodeURIComponent(accessToken)}`;
@@ -32,6 +29,30 @@ export async function connectOnline(
 
   ws.send(JSON.stringify({ type: "join", room }));
   return { ws, selfId, iceServers };
+}
+
+/**
+ * Get a guest access token, reusing a cached one while it's still valid. Reuse
+ * keeps the guest's id STABLE across reconnects (within the token TTL), so the
+ * host maps a reconnecting player back to its existing orb instead of spawning
+ * a duplicate.
+ */
+async function guestToken(): Promise<string> {
+  try {
+    const raw = sessionStorage.getItem("wz_guest");
+    if (raw) {
+      const { token, exp } = JSON.parse(raw) as { token: string; exp: number };
+      if (token && exp > Date.now() + 10_000) return token;
+    }
+  } catch { /* ignore */ }
+
+  const res = await fetch(`${API_BASE}/v1/auth/guest`, { method: "POST" });
+  if (!res.ok) throw new Error(`guest auth failed: ${res.status}`);
+  const { accessToken, expiresIn } = (await res.json()) as { accessToken: string; expiresIn?: number };
+  try {
+    sessionStorage.setItem("wz_guest", JSON.stringify({ token: accessToken, exp: Date.now() + (expiresIn ?? 900) * 1000 }));
+  } catch { /* ignore */ }
+  return accessToken;
 }
 
 /**
