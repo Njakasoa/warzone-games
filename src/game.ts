@@ -69,8 +69,18 @@ export class Game {
     try {
       const rt = await this.connect(room, name, isHost);
       rt.onPlayers = (n) => lobby.setCount(n);
-      lobby.setStatus(isHost ? "Waiting for players… 1 online" : "Connected — entering match");
-      if (!isHost && !started) this.enterMatch(); // clients jump in; render from snapshots
+      if (isHost) {
+        lobby.setStatus("Waiting for players… 1 online");
+      } else {
+        const enterWhenReady = () => {
+          if (started || this.net !== rt) return;
+          started = true;
+          this.enterMatch();
+        };
+        rt.onReady = enterWhenReady;
+        lobby.setStatus("Connected — waiting for host to start");
+        if (rt.ready) enterWhenReady();
+      }
     } catch (e) {
       console.error(e);
       const msg = e instanceof Error ? e.message : String(e);
